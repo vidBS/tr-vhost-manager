@@ -20,6 +20,7 @@ import platform
 import pwd
 import collections
 import urllib
+import re
 
 # interface/bridge for local internet bridging
 INET_IFACE_NAME = "inet0"
@@ -314,7 +315,10 @@ class Host:
 
     def install_base_packages(self):
         self.exec("apt-get -y update")
-        self.exec("apt-get -y install git vim bash python3 wget")
+        self.exec("apt-get -y install git vim bash python3")
+        # we do not want that our recently written wget conf is
+        # overwritten.
+        self.exec('apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" install wget')
 
     def bootstrap_packages(self):
         self.exec("git clone https://github.com/hgn/tr-bootstrapper.git", user=self.username)
@@ -443,29 +447,70 @@ class Bridge:
         self.c = c
         self.netem = self.__deserialize_netem(h)
 
+
+    def __construct_netem_cmd(self, data):
+        cmd = ""
+        for k, v in data.items():
+            if type(v) == list:
+                fv = ""
+                for vv in v:
+                    fv += "{} ".format(vv)
+            elif type(v) == str:
+                fv = v
+            else:
+                raise "format not supported {}".format(type(v))
+            cmd += " {} {}".format(k, fv)
+        return cmd
+
+
+    def __construct_netem_atoms(self, data):
+        return data
+
+
+    def __parse_netem_static(self, data):
+        d = dict()
+        d["class"] = data["class"]
+        d["description"] = data["description"]
+        d["cmd-start"] = self.__construct_netem_cmd(data["data"])
+        d["atoms"] = self.__construct_netem_atoms(data["data"])
+        return d
+
+
+    def __parse_netem_dynamic(self, data):
+        d = dict()
+        d["class"] = data["class"]
+        d["description"] = data["description"]
+        d["cmd-start"] = self.__construct_netem_cmd(data["data"])
+        d["atoms"] = self.__construct_netem_atoms(data["data"])
+
+        ar = []
+        for line in data["op-data"]:
+            dd = dict()
+            dd["time"] = line[0]
+            dd["cmd"] = self.__construct_netem_cmd(line[1])
+            dd["atoms"] = self.__construct_netem_atoms(line[1])
+            ar.append(dd)
+        d["cmd-runs"] = ar
+        return d
+
+
     def __deserialize_netem(self, h):
         if h is None:
             return None
-        d = dict()
         if "description" not in h:
             raise ConfigurationException("Netem class has no description: {}\n".format(h))
-        d["description"] = h["description"]
         if "class" not in h:
             raise ConfigurationException("Netem class has no class: {}\n".format(h))
-        if h["class"] != "static":
-            raise ConfigurationException("Netem class must be static for now: {}\n".format(h))
         if "data" not in h:
             raise ConfigurationException("Netem class has no data: {}\n".format(h))
+        if h["class"] == "dynamic" and not "op-data" in h:
+            raise ConfigurationException("Netem class is dyanmic but no op-data given{}\n".format(h))
 
-        cmd = ""
-        netem_cmd_packed = h["data"]
-        netem_cmd_splitted = netem_cmd_packed.split(";")
-        for netem_cmd in netem_cmd_splitted:
-            netem_cmd_key_val_tupple = netem_cmd.split(":")
-            netem_cmd_values = netem_cmd_key_val_tupple[1].split(",")
-            cmd += "{} {} ".format(netem_cmd_key_val_tupple[0], " ".join(netem_cmd_values))
-        d['cmd'] = cmd
-        return d
+        if h["class"] == "static":
+            return self.__parse_netem_static(h)
+        # dynmic case
+        return self.__parse_netem_dynamic(h)
+
 
     def __str__(self):
         return "Bridge({})".format(self.name)
@@ -491,6 +536,12 @@ class Bridge:
         sys.stderr.write("Delete bridge {}\n".format(DEBUG_BRIDGE_NAME))
         Utils.sexec("ip link set dev {} down".format(DEBUG_BRIDGE_NAME))
         Utils.sexec("brctl delbr {}".format(DEBUG_BRIDGE_NAME))
+
+    @staticmethod
+    def netem_exec(bridge_name, cmd):
+        cmd =  "tc qdisc change dev {} root netem {}".format(bridge_name, cmd)
+        print("  bridge exec: {}".format(cmd))
+        Utils.sexec(cmd)
 
     def create(self):
         self.p.msg("Create bridge: {}\n".format(self.name))
@@ -1097,18 +1148,153 @@ class TopologyStop():
 
 class TopologyNetemStart():
 
+
     def __init__(self):
         uid0_required()
         self.u = Utils()
         self.p = Printer()
+        self.player_resolution = 1
         self.parse_local_options()
+
 
     def parse_local_options(self):
         parser = argparse.ArgumentParser()
         parser.add_argument("topology", help="name of the topology", type=str)
+        parser.add_argument( "-g", "--generate-graph", dest="graph", default=False,
+                          action="store_true", help="generate a PDF of the topology")
+        parser.add_argument( "-l", "--loop", dest="loop", default=False,
+                          action="store_true", help="re-loop after last netem command was execed")
         self.args = parser.parse_args(sys.argv[2:])
+        if self.args.graph:
+            self.__check_mathplot_mod()
+            self._graph_x_axis_data = ('loss', 'delay', 'rate')
+
+
+    def __check_mathplot_mod(self):
+        try:
+            import matplotlib
+        except Exeption as e:
+            self.p.msg("You specified \"--generate-graph\" but no matplotlib is installed!\n", color="red")
+            self.p.msg("{}\n".format(e.str()), color="red")
+            self.p.msg("Exiting now, bye bye ...\n", color="red")
+            sys.exit(1)
+
+
+    def __graph_account(self, plot_db, time, interface, atoms):
+        if time not in plot_db:
+            plot_db[time] = dict()
+        plot_db[time][interface] = atoms
+
+
+    def __graph_interfaces(self, plot_db):
+        interfaces = []
+        for k, v in plot_db.items():
+            for entry in list(v.keys()):
+                interfaces.append(entry)
+        # return and filter duplicates first
+        return list(set(interfaces))
+
+
+    def __graph_convert(self, d, time, interface, data):
+        for i in self._graph_x_axis_data:
+            d[interface][i].append(data[i])
+
+
+    def __graph_plot_data_init(self, interfaces):
+        d = dict()
+        for interface in interfaces:
+            d[interface] = {}
+            for what in self._graph_x_axis_data:
+                d[interface][what] = list()
+        return d
+
+    def _graph_rm_unit(self, value):
+        if value.endswith('%'):
+            return value[0:len(value) - 1]
+        if value.endswith('ms'):
+            return value[0:len(value) - 2]
+        if value.endswith('kbit'):
+            return value[0:len(value) - 4]
+
+    def _graph_rm_units(self, values):
+        r = []
+        for value in values:
+            r.append(self._graph_rm_unit(value))
+        return r
+
+    def _graph_rm_var(self, values):
+        r = []
+        for value in values:
+            r.append(self._graph_rm_unit(value[0]))
+        return r
+
+
+    def __graph_data(self, ctrl, plot_db):
+        from matplotlib import pyplot as plt
+        atoms_last = {}; plot_data = {}
+        interfaces = self.__graph_interfaces(plot_db)
+        plot_data = self.__graph_plot_data_init(interfaces)
+        time_max = ctrl['time']
+        if time_max == 0: return
+        plot_data['time'] = list(range(time_max + 1))
+        for i in range(time_max + 1):
+            for interface in interfaces:
+                if not i in plot_db:
+                    # not accounted seconds
+                    self.__graph_convert(plot_data, i, interface, atoms_last[interface])
+                else:
+                    if interface in plot_db[i]:
+                        self.__graph_convert(plot_data, i, interface, plot_db[i][interface])
+                        atoms_last[interface] = plot_db[i][interface]
+                    else:
+                        self.__graph_convert(plot_data, i, interface, atoms_last[interface])
+        columns = len(self._graph_x_axis_data)
+        rows = len(interfaces)
+        entry = 1
+        pprint.pprint(plot_data)
+        fig = plt.figure()
+        for interface in interfaces:
+            for what in self._graph_x_axis_data:
+                axis = fig.add_subplot(rows, columns, entry)
+                if what in ("rate", "loss"):
+                    axis.plot(plot_data['time'], self._graph_rm_units(plot_data[interface][what]))
+                elif what == "delay":
+                    axis.plot(plot_data['time'], self._graph_rm_var(plot_data[interface][what]))
+                entry += 1
+        plt.show()
+
+    def _loop_re_spawn_data(self, data_arr, time_delta):
+        for data in data_arr:
+            data[0] += time_delta
+
+    def __play(self, data_arr, ctrl, max_exec_time, plot_db):
+        while True:
+            self.p.msg("\rEmulation time: {}s".format(ctrl['time']), color="magenta")
+            for data in data_arr:
+                if data[0] == ctrl['time']:
+                    cmd = data[1]
+                    interface_name = data[2]
+                    atoms = data[3]
+                    print("")
+                    Bridge.netem_exec(interface_name, cmd)
+                    if self.args.graph:
+                        self.__graph_account(plot_db, ctrl['time'], data[2], data[3])
+            if self.args.loop and ctrl['time'] != 0 and ctrl['time'] % max_exec_time == 0:
+                self._loop_re_spawn_data(data_arr, max_exec_time)
+            ctrl['time'] += self.player_resolution
+            time.sleep(self.player_resolution)
+
+
+    def __execute_inits(self, inits, plot_db):
+        self.p.msg("Initial setup of Netem Rules:\n")
+        for i in inits:
+            Bridge.netem_exec(i[1], i[0])
+            if self.args.graph:
+                self.__graph_account(plot_db, 0, i[1], i[2])
+
 
     def run(self):
+        max_exec_time = -1
         try:
             self.c = Configuration(topology=self.args.topology)
         except ArgumentException as e:
@@ -1116,10 +1302,37 @@ class TopologyNetemStart():
             sys.exit(1)
 
         topology_db = self.c.create_topology_db(self.args.topology, self.p, self.u, self.c)
+        self.p.msg("Network Emulation Starting Sequence\n")
+        if self.args.graph:
+            msg = "Generate a PDF of the bridge characteristics\n"
+        else:
+            msg = "Generate NO PDF of the bridge characteristics (--generate-graph)\n"
+        self.p.msg(msg, color=None)
+        bridges = sorted(topology_db.get_bridges(), key=lambda k: k.name)
+        cmds_init = []; cmds_run = []
+        for bridge in bridges:
+            enabled = "none" if bridge.netem is None else "enabled "
+            desc    = "" if bridge.netem is None else "\"" + bridge.netem["description"] + "\""
+            self.p.msg("  {}: {} {}\n".format(bridge.name, enabled, desc), color=None)
+            if not bridge.netem:
+                continue
+            # remember init data ...
+            cmds_init.append([bridge.netem["cmd-start"], bridge.name, bridge.netem["atoms"]])
+            # .. and dynamic ones too
+            if bridge.netem["class"] == "dynamic":
+                for i in bridge.netem["cmd-runs"]:
+                    max_exec_time = max(max_exec_time, i['time'])
+                    cmds_run.append([i["time"], i["cmd"], bridge.name, i["atoms"]])
 
-        for bridge in topology_db.get_bridges():
-            self.p.msg("  {}\n".format(bridge.name), color=None)
-            bridge.start_netem()
+        plot_db = dict(); ctrl = {}; ctrl['time'] = 0
+        self.__execute_inits(cmds_init, plot_db)
+        try:
+            self.__play(cmds_run, ctrl, max_exec_time, plot_db)
+        except KeyboardInterrupt:
+            if self.args.graph:
+                self.__graph_data(ctrl, plot_db)
+
+
 
 
 class ContainerLister():
@@ -1174,6 +1387,9 @@ class VHostManager:
         os.system("apt-get --yes --force-yes install lxc tmux ssh graphviz")
         return True
 
+    def install_packages_debian(self):
+        self.install_packages_ubuntu()
+
     def install_packages_arch(self):
         os.system("pacman -Syu --noconfirm")
         os.system("pacman -Sy --noconfirm ebtables community/lxc community/debootstrap community/tmux")
@@ -1189,14 +1405,37 @@ class VHostManager:
         elif distribution[0] == "arch":
             self.p.msg("seems you are using Arch, great ...\n")
             self.install_packages_arch()
+        elif distribution[0] == "debian":
+            self.p.msg("seems you are using Debian, great ...\n")
+            self.install_packages_debian()
         else:
             raise EnvironmentException("Distribution not detected")
 
+    def determine_proxy(self):
+        apt_conf_path = "/etc/apt/apt.conf"
+        p = re.compile('.*Acquire::http::Proxy.*\"(.*)\"', re.IGNORECASE)
+        if not os.path.isfile(apt_conf_path):
+            return None
+        if not os.access(apt_conf_path, os.R_OK):
+            return None
+        with open(apt_conf_path) as fd:
+            for line in fd:
+                 m = p.match(line)
+                 if m and m.group(1):
+                     return m.group(1)
+        return None
+
+
+
     def ask_proxy(self):
+        u = Utils()
         self.p.msg("Configuration of system proxy settings\n")
+        proxy = self.determine_proxy()
+        if proxy:
+            answer = u.query_yes_no("Is proxy \"{}\" correct?\n".format(proxy))
+            if answer == True: return proxy
         self.p.msg("If your are behing a proxy, enter the proxy url now or leave blank for none\n", color=None)
         res = False
-        u = Utils()
         while True:
             self.p.msg("URL must be in the form http://USER:PASS@url[:port]/\n", color=None)
             line = input("")

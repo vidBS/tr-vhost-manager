@@ -3,14 +3,23 @@
 		"static-50kbit" : {
 			"description" : "50kbit",
 			"class" : "static",
-			"data" : "delay:100ms,10ms;loss:0.1%;rate:50kbit"
+      "data" : { "delay": ["100ms", "10ms"], "loss": "0.1%", "rate": "200kbit" }
 		},
 		"static-200kbit" : {
 			"description" : "200kbit",
 			"class" : "static",
-			"data" : "delay:100ms,10ms;loss:0.1%;rate:200kbit"
-		}
-	},
+      "data" : { "delay": ["100ms", "10ms"], "loss": "0.1%", "rate": "200kbit" }
+		},
+		"dynamic-200kbit" : {
+			"description" : "200kbit, loss nothing, after 10 seconds 100% for 10 seconds",
+			"class" : "dynamic",
+      "data" : { "delay": ["100ms", "10ms"], "loss": "0%", "rate": "200kbit" },
+			"op-data" : [
+                [ 5, { "delay": ["100ms", "10ms"], "loss": "100%", "rate": "200kbit"} ],
+                [ 10, { "delay": ["100ms", "10ms"], "loss": "0%", "rate": "200kbit"} ]
+            ]
+        }
+    },
 
 		"devices" : {
 
@@ -167,7 +176,7 @@
 					},
 					"interfaces" : {
 						"av00" : {
-							"ipv4-addr" : "10.0.1.100",
+							"ipv4-addr" : "10.200.1.100",
 							"ipv4-addr-netmask" : "255.255.255.0",
 							"lxr-hw-addr": "AC:BB:01:01:xx:xx",
 							"lxr-link": "br01aFFr01"
@@ -204,7 +213,7 @@
 					},
 					"interfaces" : {
 						"av00" : {
-							"ipv4-addr" : "10.0.2.100",
+							"ipv4-addr" : "10.200.2.100",
 							"ipv4-addr-netmask" : "255.255.255.0",
 							"lxr-hw-addr": "AC:BB:02:01:xx:xx",
 							"lxr-link": "br02aFFr01"
@@ -242,7 +251,7 @@
 					},
 					"interfaces" : {
 						"av00" : {
-							"ipv4-addr" : "10.0.3.100",
+							"ipv4-addr" : "10.200.3.100",
 							"ipv4-addr-netmask" : "255.255.255.0",
 							"lxr-hw-addr": "AC:BB:02:01:xx:xx",
 							"lxr-link": "br03aFFr01"
@@ -283,10 +292,10 @@
 					},
 					"interfaces" : {
 						"eth0" : {
-							"ipv4-addr" : "10.0.1.1",
+							"ipv4-addr" : "10.200.1.1",
 							"ipv4-addr-netmask" : "255.255.255.0",
 							"post-up" : [
-								"ip route add default via 10.0.1.100 || true"
+								"ip route add default via 10.200.1.100 || true"
 							],
 							"lxr-hw-addr": "AC:BB:01:01:xx:xx",
 							"lxr-link": "br01aFFr01"
@@ -301,10 +310,10 @@
 					},
 					"interfaces" : {
 						"eth0" : {
-							"ipv4-addr" : "10.0.2.1",
+							"ipv4-addr" : "10.200.2.1",
 							"ipv4-addr-netmask" : "255.255.255.0",
 							"post-up" : [
-								"ip route add default via 10.0.2.100 || true"
+								"ip route add default via 10.200.2.100 || true"
 							],
 							"lxr-hw-addr": "AC:BB:02:01:xx:xx",
 							"lxr-link": "br02aFFr01"
@@ -319,12 +328,12 @@
 					},
 					"interfaces" : {
 						"eth0" : {
-							"ipv4-addr" : "10.0.3.1",
+							"ipv4-addr" : "10.200.3.1",
 							"ipv4-addr-netmask" : "255.255.255.0",
 							"post-up" : [
-								"ip route add default via 10.0.3.100 || true"
+								"ip route add default via 10.200.3.100 || true"
 							],
-							"lxr-hw-addr": "AC:BB:01:01:xx:xx",
+							"lxr-hw-addr": "AC:BB:03:01:xx:xx",
 							"lxr-link": "br03aFFr01"
 						}
 					}
@@ -336,8 +345,8 @@
 		},
 
 		"topologies" : {
-			"two-two-four" : {
-				"description" : "two UEs, two Router, four Terminals - thats all",
+			"three-three-six" : {
+				"description" : "horizontal: three UEs, three Router, six Terminals - thats all",
 				"map" : [
 				"UE(01av01)         <-> Bridge(br01aFFr01)",
 				"Bridge(br01aFFr01) <-> Router(01r01)",
@@ -380,7 +389,7 @@
 				"netem" : [
 					[ "Bridge(brFFt01x01)", "static-50kbit" ],
 					[ "Bridge(brFFt02x01)", "static-200kbit" ],
-					[ "Bridge(brFFt01x02)", "static-50kbit" ],
+					[ "Bridge(brFFt01x02)", "dynamic-200kbit" ],
 					[ "Bridge(brFFt02x02)", "static-200kbit" ]
 				]
 			}
